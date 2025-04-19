@@ -2,72 +2,111 @@ USE DEC03Assignment;
 
 
 
+
+
+
 -- Unoptimized query written by AI
 
 explain analyze
-SELECT *
-FROM (
-  SELECT *
-  FROM (
+WITH
+  -- 1. First, grab your sales filter but cast every column to VARCHAR
+  sales_step AS (
     SELECT
-      s0.salesid,
-      s0.customerid,
-      s0.productid,
-      c0.customer_name,
-      p0.product_name
+      CAST(s0.salesid      AS VARCHAR) AS salesid_str,
+      CAST(s0.customerid   AS VARCHAR) AS customerid_str,
+      CAST(s0.productid    AS VARCHAR) AS productid_str,
+      s0.*
     FROM (
-      SELECT *
+      SELECT * 
       FROM sales
-      WHERE discount > 0
+      WHERE discount > 0 
          OR quantity > 10
     ) AS s0
+  ),
 
+  -- 2. Attach customer names via a sub‑subquery
+  cust_step AS (
+    SELECT ss.*, c0.customer_name
+    FROM sales_step ss
     JOIN (
-      SELECT
-        customerid,
-        firstname || ' ' || lastname AS customer_name
+      SELECT customerid, firstname || ' ' || lastname AS customer_name
       FROM customers
     ) AS c0
-      ON s0.customerid = c0.customerid
+      ON ss.customerid = c0.customerid
+  ),
 
+  -- 3. Attach product names via another sub‑subquery
+  prod_step AS (
+    SELECT cs.*, p0.product_name
+    FROM cust_step cs
     JOIN (
-
-      SELECT
-        productid,
-        productname AS product_name
+      SELECT productid, productname AS product_name
       FROM products
     ) AS p0
-      ON s0.productid = p0.productid
+      ON cs.productid = p0.productid
+  ),
 
-  ) AS s1
+  -- 4. Identify zero‑price customers
+  zero_price_cust AS (
+    SELECT DISTINCT customerid
+    FROM (
+      SELECT * 
+      FROM sales
+      WHERE totalprice = 0
+    ) AS zp
+  ),
 
-  WHERE
+  -- 5. Filter by those customers
+  filter_cust AS (
+    SELECT ps.*
+    FROM prod_step ps
+    WHERE ps.customerid IN (SELECT customerid FROM zero_price_cust)
+  ),
 
-    s1.customerid IN (
-      SELECT s2.customerid
-      FROM (
-        SELECT DISTINCT s3.customerid
-        FROM (
-          SELECT *
-          FROM sales
-          WHERE totalprice = 0
-        ) AS s3
-      ) AS s2
-    )
+  -- 6. Identify recent sales
+  recent_sales AS (
+    SELECT salesid
+    FROM (
+      SELECT * FROM sales
+    ) AS all_s
+    WHERE all_s.salesdate > '2018-01-01'
+  ),
 
-    AND
+  -- 7. Filter again by recent sales
+  filter_both AS (
+    SELECT fc.*
+    FROM filter_cust fc
+    WHERE fc.salesid IN (SELECT salesid FROM recent_sales)
+  ),
 
-    s1.salesid IN (
-      SELECT s4.salesid
-      FROM (
-        SELECT *
-        FROM sales
-      ) AS s4
-      WHERE s4.salesdate > '2018-01-01'
-    )
+  -- 8. Number every row (but keep them all)
+  numbered AS (
+    SELECT 
+      fb.*, 
+      ROW_NUMBER() OVER (PARTITION BY fb.customerid ORDER BY fb.salesid) AS rn
+    FROM filter_both fb
+  ),
 
-) AS final_sub;
+  -- 9. Dummy UNION to bloat things further
+  final_union AS (
+    SELECT * FROM numbered
+    UNION ALL
+    SELECT * FROM numbered WHERE 1=0
+  )
 
+-- 10. Final select with a CROSS JOIN LATERAL that does nothing but count
+SELECT
+  fu.*
+FROM final_union fu
+CROSS JOIN LATERAL (
+  SELECT COUNT(*) AS total_count
+  FROM final_union
+) AS cnt
+WHERE fu.rn >= 1    -- keeps all rows
+ORDER BY
+  fu.salesdate DESC,
+  fu.customerid,
+  fu.salesid;
 
 
 
@@ -90,20 +129,23 @@ create index idx_salesdate on sales(salesdate);
 
 explain analyze
 with zero_price_customers as (
-    select distinct customerid
-    from sales
-    where totalprice = 0),
+  select distinct customerid
+  from sales
+  where totalprice = 0
+)
 
-  filtered_sales as (
-    select salesid, customerid, productid
-    from sales
-    where salesdate > '2018-01-01' and (discount > 0 or quantity > 10))
-    
-select *
-from filtered_sales fs
-join zero_price_customers zpc on fs.customerid = zpc.customerid
-join customers c on fs.customerid = c.customerid
-join products p on fs.productid = p.productid;
+ select
+  s.salesid,
+  s.customerid,
+  s.productid,
+  c.firstname || ' ' || c.lastname as customer_name,
+  p.productname as product_name
+from sales s
+join zero_price_customers zpc on s.customerid = zpc.customerid
+join customers c on s.customerid = c.customerid
+join products p on s.productid = p.productid
+where s.salesdate > '2018-01-01'
+  and (s.discount > 0 or s.quantity > 10);
 
 
 
@@ -112,6 +154,7 @@ join products p on fs.productid = p.productid;
 -- Additional: Query optimization in DuckDB 
 
 -- Original script
+
 
 SELECT count(*)
 FROM (
